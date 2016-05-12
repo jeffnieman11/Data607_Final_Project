@@ -1,0 +1,271 @@
+---
+title: "Data 607 Final Project"
+author: "Jeff Nieman"
+date: "May 4, 2016"
+output: pdf_document
+---
+
+One of my goals in taking this degree program is to apply what I learn at work.  Our group is in the midst of setting up a new change management organization.  One of the greatest challenges we face involves measuring change management effectiveness.  Toward that end I created a survey with 21 responses, and used a standardized sentiment value database with positive and negative values for 98,732 words to build a model that will rate the textual input in a numerical way.  This will allow me to compare change management effectiveness across multiple distinct initiatives.
+
+####1. Loading the packages required
+
+```{r, warning=F, message=F}
+library(stringr)
+library(RCurl)
+library(knitr)
+library(rmongodb)
+library(jsonlite)
+library(dplyr)
+library(sqldf)
+library(tidyr)
+library(ggplot2)
+
+```
+
+####2. Creating the value dictionary
+I used SentiWordNet 3.0, a lexical resource for opinion mining.  It can be found at  sentiwordnet.isti.cnr.it.  After loading the dataset I added column names, eliminated all words with both a positive and negative value of 0 and eliminated any duplicate words.
+
+```{r, warning=F, message=F}
+wordsense <- read.table('https://raw.githubusercontent.com/jeffnieman11/Data607_Final_Project/master/SentiWordNet_3.0.0_20130122.txt', sep="\t")
+
+#C:/Users/jenieman/Documents/CUNY/Data 607/SentiWordnet/home/swn/www/admin/dump/SentiWordNet_3.0.0_20130122.txt
+
+colnames(wordsense) <- c("Letter", "ID", "Positive_Value", "Negative_Value", "Word")
+wordsense_use <- subset(wordsense, Positive_Value!=0 | Negative_Value!=0)
+
+wordsense_use1 <- subset(wordsense_use, !duplicated(wordsense_use[,5]))
+head(wordsense_use1)
+
+```
+
+####3. Putting the data into Mongodb
+To allow simple ways to check words in dictionary I created a mongodb.  I originally planned on using this to compare with my surveys but later on decided to go with a SQL join shown below.
+
+```{r, warning=F, message=F}
+mongofinal<- mongo.create()
+mongofinal
+mongo.is.connected(mongofinal)
+
+db <- "group.wordsense"
+mfinal <- "group.wordsense.word_values"
+
+mongo.get.database.collections(mongofinal, db)
+
+wordsense.1 <- lapply(split(wordsense_use, 1:nrow(wordsense_use1)), function(x) mongo.bson.from.JSON(toJSON(x)))
+
+wordsense.1[1:3]
+
+mongo.insert.batch(mongofinal, mfinal, wordsense.1)
+
+mongo.count(mongofinal, mfinal)
+```
+
+####4. Creating the survey
+I used an internal tool to create a survey.  Here is a summary of the questions:
+
+
+----------------------------------------------------
+1.  For which initiative have you participated in training?
+2.  Which training tools have you used?
+3.  Rank the following tools from most effective to least effective? (VOD, Web, Instructor, Virtual, OJT, QRG, Powerpoint, Other)
+4.  What do you like best about your top rated choice in question 3?
+5.  What are some factors that make an ideal training experience?
+6.  How would you describe your normal training experience?
+
+
+####5. Ranking the training methods
+I loaded the raw data obtained  from the survey into R.  I then transformed the dataset and used that to rank the training methods we use from most effective to least with graphics displaying the answers.
+
+```{r, warning=F, message=F}
+survey.raw <- read.csv('https://raw.githubusercontent.com/jeffnieman11/Data607_Final_Project/master/survey_raw_text.csv', header = T)
+
+#C:/Users/jenieman/Documents/CUNY/Data 607/survey_raw_text.csv
+#rank most effective means of CM training
+training_methods <- survey.raw[,c(1, 13:20)]
+colnames(training_methods) <- c("ID", "VOD", "Web", "Instructor", "Virtual_Instructor", "OJT", "QRG", "PowerPoint", "Other")
+
+training.1 <- summarise_each(training_methods, funs(mean))
+training.2 <- training.1[,2:9]
+training.2 <- gather(training.2, "Method", "Value")
+training.2 <- arrange(training.2, Value)
+training.2
+
+ggplot(data=training.2, aes(x=reorder(Method, Value), y=Value)) + geom_bar(stat="identity", color="blue", fill="steelblue", width=0.5) + scale_y_continuous() + xlab("CM Training Methods from most to least popular") + ylab("Score (lower value means more popular)")
+
+```
+
+Conclusion:  To no surprise the most preferred form of CM training is OJT (On the Job Training).  Unfortunately a very common form of training , the VOD (Video on Demand) is the least preferred form of training.  Our training lead and I will be presenting this analysis to our service manager.
+
+####6. Evaluating the effectiveness of initiatives
+I subsetted the responses into those reflected into three categories of initiative:  CSCC, SOT and other.  I then pulled out the evaluation text from the last question in the survey and transformed the text into a data frame of words (eliminating capital letters and punctuation).  I also created a test negative and a test positive text as a control.
+
+```{r, warning=F, message=F}
+training.evaluation <- subset(survey.raw[,c(1:4,23)])
+colnames(training.evaluation) <- c("ID", "CSCC", "SOT", "Other", "Feedback")
+#eliminate blank responses
+training.evaluation.1 <- training.evaluation[c(1:8, 10:19),]
+
+CSCC <- subset(training.evaluation.1, CSCC==1)
+SOT <- subset(training.evaluation.1, SOT==1)
+Other <- subset(training.evaluation.1, Other==1)
+n.CSCC <- nrow(CSCC)
+n.SOT <- nrow(SOT)
+n.Other <- nrow(Other)
+
+CSCC_text <- paste(unlist(CSCC$Feedback), collapse=" ")
+CSCC_text1 <- gsub("[[:punct:]]","", CSCC_text)
+CSCC_text2 <- tolower(CSCC_text1)
+CSCC_text3 <- as.vector(strsplit(CSCC_text2, " "))
+CSCC_text4 <- data.frame(unlist(CSCC_text3), ncol=1)
+colnames(CSCC_text4) <- "words"
+head(CSCC_text4)
+
+SOT_text <- paste(unlist(SOT$Feedback), collapse=" ")
+SOT_text1 <- gsub("[[:punct:]]","", SOT_text)
+SOT_text2 <- tolower(SOT_text1)
+SOT_text3 <- as.vector(strsplit(SOT_text2, " "))
+SOT_text4 <- data.frame(unlist(SOT_text3), ncol=1)
+colnames(SOT_text4) <- "words"
+head(SOT_text4)
+
+Other_text <- paste(unlist(Other$Feedback), collapse=" ")
+Other_text1 <- gsub("[[:punct:]]","", Other_text)
+Other_text2 <- tolower(Other_text1)
+Other_text3 <- as.vector(strsplit(Other_text2, " "))
+Other_text4 <- data.frame(unlist(Other_text3), ncol=1)
+colnames(Other_text4) <- "words"
+head(Other_text4)
+
+#Control reviews
+Neg_text <- "This is a terrible product.  The training was boring and long.  I fell asleep because of the poor presentation skills."
+Neg_text1 <- gsub("[[:punct:]]","", Neg_text)
+Neg_text2 <- tolower(Neg_text1)
+Neg_text3 <- as.vector(strsplit(Neg_text2, " "))
+Neg_text4 <- data.frame(unlist(Neg_text3), ncol=1)
+colnames(Neg_text4) <- "words"
+n.Neg<- 1
+head(Neg_text4)
+
+Pos_text <-  "I loved the presentation.  I was fully engaged and enjoyed the entire process.  The adoption went smoothly and the support has been wonderful.  Thanks!"
+Pos_text1 <- gsub("[[:punct:]]","", Pos_text)
+Pos_text2 <- tolower(Pos_text1)
+Pos_text3 <- as.vector(strsplit(Pos_text2, " "))
+Pos_text4 <- data.frame(unlist(Pos_text3), ncol=1)
+colnames(Pos_text4) <- "words"
+n.Pos<- 1
+head(Pos_text4)
+```
+
+####7. SQL Joins and Sentiment Value
+Using SQL I joined each word found in the value dictionary to the text for that initiative.  I added positive values and subtracted negative values.  I then normalized by dividing by the number of responses. This statistical analysis will allow me to compare my findings across initiatives.
+
+```{r, warning=F, message=F}
+CSCC.join<- sqldf("select wordsense_use1.Word, wordsense_use1.Positive_Value, wordsense_use1.Negative_Value from wordsense_use1 inner join CSCC_text4 on wordsense_use1.Word= CSCC_text4.words")
+CSCC.review <- (sum(CSCC.join$Positive_Value) - sum(CSCC.join$Negative_Value))/n.CSCC
+head(CSCC.join)
+CSCC.review
+
+SOT.join<- sqldf("select wordsense_use1.Word, wordsense_use1.Positive_Value, wordsense_use1.Negative_Value from wordsense_use1 inner join SOT_text4 on wordsense_use1.Word = SOT_text4.words")
+SOT.review <- (sum(SOT.join$Positive_Value) - sum(SOT.join$Negative_Value))/n.SOT
+head(SOT.join)
+SOT.review
+
+Other.join<- sqldf("select wordsense_use1.Word, wordsense_use1.Positive_Value, wordsense_use1.Negative_Value from wordsense_use1 inner join Other_text4 on wordsense_use1.Word = Other_text4.words")
+Other.review <- (sum(Other.join$Positive_Value) - sum(Other.join$Negative_Value))/n.Other
+head(Other.join)
+Other.review
+
+#Test two control reviews to see if it works
+Neg.join<- sqldf("select wordsense_use1.Word, wordsense_use1.Positive_Value, wordsense_use1.Negative_Value from wordsense_use1 inner join Neg_text4 on Neg_text4.words=wordsense_use1.Word")
+Neg.review <- (sum(Neg.join$Positive_Value) - sum(Neg.join$Negative_Value))/n.Neg
+head(Neg.join)
+Neg.review
+
+Pos.join<- sqldf("select wordsense_use1.Word, wordsense_use1.Positive_Value, wordsense_use1.Negative_Value from wordsense_use1 inner join Pos_text4 on Pos_text4.words=wordsense_use1.Word")
+Pos.review <- (sum(Pos.join$Positive_Value) - sum(Pos.join$Negative_Value))/n.Pos
+head(Pos.join)
+Pos.review
+
+Review <- c(CSCC.review, SOT.review, Other.review, Neg.review, Pos.review)
+Init <- c("CSCC", "SOT", "Other", "Neg_Control", "Pos_Control")
+Review.findings <- data.frame(Init, Review)
+Review.findings <- arrange(Review.findings, Review)
+Review.findings
+
+ggplot(data=Review.findings, aes(x=reorder(Init, Review), y=Review)) + geom_bar(stat="identity", color="blue", fill="red", width=0.5) + scale_y_continuous() + xlab("Initiatives ranked from lowest to highest")
+
+```
+
+####8.Confirm statistical significance of results with hypothesis 
+The results seem to show a lower score for SOT in comparison with other initiatives.  My null hypothesis is that there is no difference between SOT evaluations and non-SOT evaluations.   To do this I created a loop to generate scores for each individual  review.  
+
+```{r, warning = F, message=F}
+#SOT
+SOT.list <- vector("list", length = nrow(SOT))
+for (i in 1:nrow(SOT)){
+  SOT_text <- paste(unlist(SOT[i,5]), collapse=" ")
+  SOT_text1 <- gsub("[[:punct:]]","", SOT_text)
+  SOT_text2 <- tolower(SOT_text1)
+  SOT_text3 <- as.vector(strsplit(SOT_text2, " "))
+  SOT_text4 <- data.frame(unlist(SOT_text3), ncol=1)
+  colnames(SOT_text4) <- "words"
+  head(SOT_text4) 
+  SOT.join<- sqldf("select wordsense_use1.Word, wordsense_use1.Positive_Value, wordsense_use1.Negative_Value from wordsense_use1 inner join SOT_text4 on wordsense_use1.Word = SOT_text4.words")
+SOT.review <- (sum(SOT.join$Positive_Value) - sum(SOT.join$Negative_Value))
+SOT.list[[i]] <- SOT.review
+print(SOT.review)
+}
+
+#nonSOT
+CSCC.list <- vector("list", length = nrow(CSCC))
+for (i in 1:nrow(CSCC)){
+  CSCC_text <- paste(unlist(CSCC[i,5]), collapse=" ")
+  CSCC_text1 <- gsub("[[:punct:]]","", CSCC_text)
+  CSCC_text2 <- tolower(CSCC_text1)
+  CSCC_text3 <- as.vector(strsplit(CSCC_text2, " "))
+  CSCC_text4 <- data.frame(unlist(CSCC_text3), ncol=1)
+  colnames(CSCC_text4) <- "words"
+  CSCC.join<- sqldf("select wordsense_use1.Word, wordsense_use1.Positive_Value, wordsense_use1.Negative_Value from wordsense_use1 inner join CSCC_text4 on wordsense_use1.Word = CSCC_text4.words")
+CSCC.review <- (sum(CSCC.join$Positive_Value) - sum(CSCC.join$Negative_Value))
+CSCC.list[[i]] <- CSCC.review
+print(CSCC.review)
+}
+
+Other.list <- vector("list", length = nrow(Other))
+for (i in 1:nrow(Other)){
+  Other_text <- paste(unlist(SOT[i,5]), collapse=" ")
+  Other_text1 <- gsub("[[:punct:]]","", Other_text)
+  Other_text2 <- tolower(Other_text1)
+  Other_text3 <- as.vector(strsplit(Other_text2, " "))
+  Other_text4 <- data.frame(unlist(Other_text3), ncol=1)
+  colnames(Other_text4) <- "words"
+  Other.join<- sqldf("select wordsense_use1.Word, wordsense_use1.Positive_Value, wordsense_use1.Negative_Value from wordsense_use1 inner join Other_text4 on wordsense_use1.Word = Other_text4.words")
+Other.review <- (sum(Other.join$Positive_Value) - sum(Other.join$Negative_Value))
+Other.list[[i]] <- Other.review
+print(Other.review)
+}
+
+review.list <- matrix(c(SOT.list,Other.list,CSCC.list))
+colnames(review.list) <- "Value"
+program <- c(rep("SOT", times =11), rep("nonSOT", times =12))
+review.init <- data.frame(program, review.list)
+
+nonSOT.value <- subset(review.init, program=="nonSOT")
+nonSOT.value$Value <- as.numeric(nonSOT.value$Value)
+mean(nonSOT.value$Value)
+
+SOT.value <- subset(review.init, program=="SOT")
+SOT.value$Value <- as.numeric(SOT.value$Value)
+m <- mean(SOT.value$Value)
+sdev <- sd(SOT.value$Value)
+SE <- sdev/sqrt(nrow(SOT.value))
+CI <- 1.96*SE
+m + CI
+m - CI
+```
+
+####Conclusion:
+While the SOT program has a lower mean (0.295) than the nonSOT programs (0.448), the 95% confidence intervals for the data we pulled are between -0.067 and 0.658.  Since the mean for the nonSOT program fits within this confidence interval we need to accept the null hypothesis.  I cannot conclusively say that the SOT program has more negative reviews than the nonSOT programs.
+
+
+
